@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>録音ブリッジ</title>
+<style>
+  body { font-family: sans-serif; text-align: center; padding: 24px; }
+  button { font-size: 18px; padding: 12px 24px; margin: 8px; border-radius: 8px; }
+  #status { margin: 16px 0; color: #555; }
+  .rec { color: #c00; font-weight: bold; }
+</style>
+</head>
+<body>
+  <h3>マイク録音ブリッジ</h3>
+  <p id="status">準備中…</p>
+  <button id="startBtn" disabled>録音開始</button>
+  <button id="stopBtn" disabled>停止して送信</button>
+
+<script>
+// ============================================================
+// 这是"弹窗桥接页"。必须托管在 GAS 之外的 HTTPS 静态主机上
+// （GitHub Pages / Netlify / Cloudflare Pages 均可）。
+// 它在顶层窗口运行，不受 GAS iframe 的 Permissions Policy 限制，
+// 因此 iOS Safari/Chrome 也能正常调用 getUserMedia。
+// ============================================================
+
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const stopBtn  = document.getElementById('stopBtn');
+
+let mediaRecorder = null;
+let chunks = [];
+let stream = null;
+
+// iOS Safari (14.3+) 支持 MediaRecorder，但只支持 audio/mp4。
+// 按顺序探测可用的 mimeType。
+function pickMimeType() {
+  const candidates = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
+  return candidates.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+}
+
+async function init() {
+  if (!window.opener) {
+    statusEl.textContent = 'エラー: 親ウィンドウが見つかりません。GASアプリから開いてください。';
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    statusEl.textContent = 'マイク使用許可OK。録音を開始できます。';
+    startBtn.disabled = false;
+  } catch (err) {
+    statusEl.textContent = 'マイクエラー: ' + err.name + ' - ' + err.message;
+    // 把失败信息也回传给 GAS 页面，方便在 iPhone 上排查
+    window.opener.postMessage({ type: 'AUDIO_CAPTURE_ERROR', error: err.name + ': ' + err.message }, '*');
+  }
+}
+
+startBtn.onclick = () => {
+  chunks = [];
+  const mimeType = pickMimeType();
+  mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  mediaRecorder.onstop = sendBack;
+  mediaRecorder.start();
+  statusEl.textContent = '録音中…';
+  statusEl.className = 'rec';
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+};
+
+stopBtn.onclick = () => {
+  stopBtn.disabled = true;
+  mediaRecorder.stop();
+  stream.getTracks().forEach(t => t.stop());
+};
+
+function sendBack() {
+  const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/mp4' });
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    // 验证阶段用 '*'。上线时请改为你的 GAS 页面实际 origin
+    // （形如 https://xxxx.googleusercontent.com），以防数据被其他页面截获。
+    window.opener.postMessage({
+      type: 'AUDIO_CAPTURE_SUCCESS',
+      base64DataUrl: reader.result,
+      mimeType: blob.type
+    }, '*');
+    statusEl.textContent = '送信完了。このウィンドウは閉じて構いません。';
+    statusEl.className = '';
+    // iOS 上 window.close() 对 window.open 打开的窗口有效
+    setTimeout(() => window.close(), 800);
+  };
+  reader.readAsDataURL(blob);
+}
+
+init();
+</script>
+</body>
+</html>
